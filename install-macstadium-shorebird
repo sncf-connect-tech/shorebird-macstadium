@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if [[ -z "${FLUTTER_VERSION:-}" ]]; then
+  printf >&2 "Error: Variables env FLUTTER_VERSION is mandatory\n"
+  exit 1
+fi
+
+if [[ -z "${COCOAPODS_VERSION:-}" ]]; then
+  printf >&2 "Error: Variable envs COCOAPODS_VERSION is mandatory\n"
+  exit 1
+fi
+
+if [[ -z "${VM_SSH_PASSWORD:-}" ]]; then
+  printf >&2 "Error: Variables env VM_SSH_PASSWORD is mandatory\n"
+  exit 1
+fi
+
+printf >&2 "Shorebird %s installation...\n" "${FLUTTER_VERSION}"
+curl --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/shorebirdtech/install/main/install.sh -sSf | bash -s -- --force
+shorebird flutter versions use "${FLUTTER_VERSION}"
+shorebird doctor
+cat <<EOF >>~/.zshenv
+export FLUTTER_HOME=/Users/admin/flutter
+export GLOBAL_PUB_CACHE=/Users/admin/.pub-cache
+EOF
+
+printf >&2 "Installing bash jq lcov\n"
+brew install bash jq lcov
+
+cd
+cat <<EOF >Gemfile
+source "https://rubygems.org"
+gem "fastlane"
+gem "cocoapods", "${COCOAPODS_VERSION}"
+EOF
+echo 'export BUNDLE_GEMFILE=/Users/admin/Gemfile' >>~/.zshenv
+
+printf >&2 "Homebrew ruby home and related gems depends on machine architecture (ARM or Intel)\n"
+arch=$(uname -m)
+if [[ "${arch}" == "arm"* ]]; then
+  homebrew_path="/opt/homebrew"
+else
+  homebrew_path="/usr/local"
+fi
+
+printf >&2 "Changing %s/lib/ruby/gems owner\n" "${homebrew_path}"
+echo "${VM_SSH_PASSWORD}" | sudo -S chown -R "$(whoami)":admin "${homebrew_path}/lib/ruby/gems"
+
+ruby_version="2.7"
+ruby_version_for_gems="2.7.0"
+echo "export RUBY_HOME=${homebrew_path}/opt/ruby@$ruby_version" >>~/.zshenv
+echo "export PATH=${homebrew_path}/opt/ruby@$ruby_version/bin:${homebrew_path}/lib/ruby/gems/$ruby_version_for_gems/bin:\$PATH" >>~/.zshenv
+printf >&2 "updating PATH var env\n"
+echo "export PATH=\$FLUTTER_HOME/bin:\$GLOBAL_PUB_CACHE/bin:\$RUBY_HOME/bin:\$PATH" >>~/.zshenv
+
+printf >&2 "IMPORTANT: Always use .zshenv instead of .zshrc because the later isn't used by Macstadium VMs\n"
+
+source "/Users/admin/.zshenv"
+gem install bundler && bundle install
+
+printf >&2 "Installation check  ..\n"
+
+shorebird --version
+printf >&2 "Shorebird OK ..\n"
+
+dart --version
+printf >&2 "Dart OK ..\n"
+
+ruby --version
+printf >&2 "Ruby is OK ..\n"
+
+echo "Cocoapods version: "; pod --version
+pod --version | grep -q "${COCOAPODS_VERSION}" || (echo "bad Cocoapods version :S";exit 1)
+printf >&2 "Cocoapods is OK ..\n"
+
+shorebird doctor
+printf >&2 " Xcode - develop for iOS and macOS must be OK\n"
+
+gitlab-runner --version
+printf >&2 "Gitlab runner  OK ..\n"
+
+printf >&2 "\o/ installations OK \n"

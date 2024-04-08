@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+shopt -s inherit_errexit
+
+OWN_DIR=$(cd "$(dirname "$0")" && pwd)
+PROJECT_ROOT_DIR="${OWN_DIR}/.."
+source "${PROJECT_ROOT_DIR}/orka.env"
+
+echo $#
+if [[ $# -lt 4 || -z "$1" || -z "$2" || -z "$3" || -z "$4" ]]; then
+  printf "Usage:\n"
+  printf "       RUNNER_VM_CONFIG_SUFFIX BASE_IMAGE FLUTTER_VERSION COCOAPODS_VERSION\n"
+  printf "       RUNNER_VM_CONFIG_SUFFIX: [a, b, c]\n"
+  printf "       BASE_IMAGE: name of base image, for ex. Ventura_arm_Xcode_14_3.orkasi\n"
+  printf "       FLUTTER_VERSION: flutter version, for ex. 3.10.5\n"
+  printf "       COCOAPODS_VERSION: cocoapod version , for ex. 1.12.1\n"
+  printf "       FORCE_REPLACE: if required exists, vm config is replaced. By default: false\n  "
+  printf "\n"
+  printf 'Ex  :  %s a Ventura_arm_Xcode_14_3.orkasi 3.10.5 1.12.1\n' "${0}"
+  printf "\n"
+  printf "Mandatory variables env:\n"
+  printf "                ORKA_PASSWORD: var env that contains password on Orka.\n"
+  printf "                VM_SSH_PASSWORD: var env connect to vm (see   \n"
+  printf "\n"
+
+  exit 1
+fi
+
+runner_suffix="${1}"
+printf "Runner suffix: %s\n" "${runner_suffix}"
+base_image="${2}"
+printf "Base image: %s\n" "${base_image}"
+flutter_version="${3}"
+printf "Flutter version: %s\n" "${flutter_version}"
+cocoapod_version="${4}"
+printf "Cocoapod version: %s\n" "${cocoapod_version}"
+force_replace="${5:-false}"
+printf "Force replace %s\n" "${force_replace}"
+
+printf "Check mandatory env variables\n"
+if [[ -z "${ORKA_PASSWORD=-}" ]]; then
+  printf >&2 "ORKA_PASSWORD var env empty! (password associated to user %s (endpoint:%s)\n" "${ORKA_USER}" "${ENDPOINT}"
+  exit 1
+fi
+
+if [[ -z "${VM_SSH_PASSWORD:-}" ]]; then
+  printf >&2 "VM_SSH_PASSWORD var env empty! (password associated to vm ssh user %)\n" "${VM_SSH_PASSWORD}" "${VM_SSH_USERNAME}"
+  exit 1
+fi
+
+printf "%s\n" "Check required tools (packer, orka) and install them if missing !" >&2
+
+if ! command -v packer &>/dev/null; then
+  printf "%s\n" "packer could not be found! Happen only on local machine. On CI, packer docker image is used"
+  brew install packer
+fi
+printf "Packer Ok! \n"
+packer version
+
+if ! command -v orka &>/dev/null; then
+  printf "%s\n" "orka could not be found"
+  if [ "$(uname)" == "Darwin" ]; then
+    brew install orka
+  fi
+fi
+printf "Orka Ok! \n"
+orka version
+
+runner_vm_config="runner-arm-shorebird-${TEAM}-${runner_suffix}"
+vm_cpu_number=${ARM_VM_CPU_CORE}
+
+image_name="shorebird_${flutter_version//./_}_cocoapod_${cocoapod_version//./_}_${base_image}"
+
+createImage=false
+printf "Authentication with Orka!\n"
+orka config -a "${ENDPOINT}" --json >/dev/null 2>&1
+orka login -e "${ORKA_USER}" --password "${ORKA_PASSWORD}" --json | grep 'message' | awk '{$1=$1};1'
+
+printf "Check if vm config runner [%s] already exists on Orka! \n" "${runner_vm_config}"
+if orka vm configs -f "${runner_vm_config}" --json | grep "${runner_vm_config}"; then
+  if [[ ${force_replace} == "true" ]]; then
+    printf "FORCE_REPLACE is true, thus remove vm config runner [%s] even already exists" "${runner_vm_config}"
+    orka vm purge -v "${runner_vm_config}" --json | grep 'message' | awk '{$1=$1};1'
+  else
+    printf "%s already exists! Please check if used and remove it manually if can be removed (via UI (%s/web/vm-configs) \n" "${runner_vm_config}" "${ENDPOINT}"
+    orka vm configs -f "${runner_vm_config}"
+    exit 1
+  fi
+fi
+
+printf "Check check if [%s] image exists!\n" "${image_name}"
+if orka image list -f "${image_name}" --json | grep "${image_name}"; then
+  printf "%s Image already exists! Skip creation (or remove it manually if we create a new one)! \n" "${base_image}"
+  orka image list -f "${image_name}"
+else
+  createImage=true
+fi
+
+if [[ "${createImage}" == "true" ]]; then
+
+  printf "Create image [%s] using packer\n" "${image_name}"
+  packer init "${PROJECT_ROOT_DIR}"
+  packer build \
+    -var create_image="${createImage}" \
+    -var endpoint="${ENDPOINT}" \
+    -var orka_user="${ORKA_USER}" \
+    -var orka_password="${ORKA_PASSWORD}" \
+    -var vm_ssh_username="${VM_SSH_USERNAME}" \
+    -var vm_ssh_password="${VM_SSH_PASSWORD}" \
+    -var base_image="${base_image}" \
+    -var image_name="${image_name}" \
+    -var vm_cpu_number="${vm_cpu_number}" \
+    -var flutter_version="${flutter_version}" \
+    -var cocoapod_version="${cocoapod_version}" \
+    "${PROJECT_ROOT_DIR}/packer-shorebird-ios.pkr.hcl"
+fi
+printf "Final step: create the new vm config %s based on %s!\n" "${runner_vm_config}" "${image_name}"
+printf "Authentication with Orka on DC again!\n"
+orka config -a "${ENDPOINT}" --json >/dev/null 2>&1
+orka login -e "${ORKA_USER}" --password "${ORKA_PASSWORD}" --json | grep 'message' | awk '{$1=$1};1'
+orka vm create-config -v "${runner_vm_config}" -b "${image_name}" -c "${vm_cpu_number}" -C "${vm_cpu_number}" --vnc no --json | grep "message"
+
+printf "Vm config %s successfully created!\n" "${image_name}"

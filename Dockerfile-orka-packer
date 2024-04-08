@@ -1,0 +1,11 @@
+FROM  hashicorp/packer
+
+USER root
+
+ENV OKRA_CLI_VERSION="2.4.0"
+
+RUN wget https://cli-builds-public.s3.eu-west-1.amazonaws.com/official/${OKRA_CLI_VERSION}/linux/orka.zip -O orka.zip \
+    && unzip orka.zip  && mv ./orka /usr/local/bin \
+    && rm orka.zip
+RUN apk add gcompat && apk add --no-cache libstdc++
+ENTRYPOINT ["/bin/bash", "-c"]
